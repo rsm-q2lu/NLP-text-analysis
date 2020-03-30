@@ -1,0 +1,809 @@
+---
+title: "unstructured data"
+author: "aki"
+date: "1/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(readxl)
+library(tidyverse)
+library(tidytext)
+library(scales)
+library(radiant)
+library(topicmodels)
+library(SnowballC)
+library(LDAvis)
+library(textstem)
+library(keras)
+library(tensorflow)
+library(wordcloud)
+
+```
+
+##### Data cleaning (preparation):
+```{r}
+data=read_excel('consumer complaints subset data.xlsx')
+
+data_labeled=data%>% mutate(important=(ifelse(`Company response to consumer`=='Closed with monetary relief',1,0)))
+
+brief= data_labeled%>% group_by(important) %>% summarize(n=n(),prop=n/nrow(data_labeled))
+brief
+
+product=data_labeled$Product
+```
+
+
+combine product category:
+```{r}
+falsename=grep("^Credit",ignore.case=TRUE,product)
+
+falsename1=grep("^Prepaid",ignore.case=TRUE,product)
+falsename2=grep("^Credit reporting",ignore.case=TRUE,product)
+falsename3=grep("^Money transfer",ignore.case=TRUE,product)
+falsename4=grep("loan",ignore.case=TRUE,product)
+
+for (i in falsename){
+  data_labeled$Product[i]="Credit Card"
+}
+
+for (i in falsename1){
+  data_labeled$Product[i]="Credit Card"
+}
+
+for (i in falsename2){
+  data_labeled$Product[i]="Credit reporting"
+}
+
+for (i in falsename3){
+  data_labeled$Product[i]="Money transfers"
+}
+
+for (i in falsename4){
+  data_labeled$Product[i]="Loan"
+}
+
+```
+
+#### EDA
+
+##### 1. What are customers complaining about?
+
+Most complaints that we give monetary compensation are about credit card：
+
+```{r}
+
+
+monetarycases=data_labeled %>% group_by(Product) %>% summarize(n_monetarycases=sum(important),ntotal=n()) %>% arrange(desc(n_monetarycases))
+monetarycases
+
+ggplot(monetarycases,aes(x=fct_reorder(Product,n_monetarycases),y=n_monetarycases))+geom_bar(stat='identity',fill="darkgreen",color="darkgreen")+coord_flip()+
+          theme(axis.text.x=element_text(angle = 45, hjust = 1))+labs(x="product",y="number of monetary compensation")
+
+
+       
+visualize(monetarycases,
+          xvar="Product",
+          yvar="n_monetarycases",
+          type="bar",
+          labs=list(x="product",y="number of monetary compensation"),
+          custom=TRUE
+          )+
+          theme(axis.text.x=element_text(angle = 45, hjust = 1)) 
+```
+
+What are the products that have the highest monetary compensation percentage? 
+checking and bank account&credit card
+
+```{r}
+visualize(data_labeled,
+          xvar="Product",
+          yvar="important",
+          type="bar",
+          labs=list(x="product",y="proportion of monetary compensation"),
+          custom=TRUE
+          )+
+          theme(axis.text.x=element_text(angle = 45, hjust = 1))
+
+monetarycases_prop=monetarycases  %>% mutate(prop=n_monetarycases/ntotal) %>% arrange(desc(n_monetarycases))
+
+
+ggplot(monetarycases_prop,aes(x=fct_reorder(Product,prop),y=prop))+geom_bar(stat='identity',fill="darkblue",color="darkblue")+coord_flip()+
+          theme(axis.text.x=element_text(angle = 45, hjust = 1))+labs(x="product",y="proportion of monetary compensation")
+         
+```
+
+So, we should put more emphasis on the 3 products: credit card,checking or saving account and bank account.
+
+
+##### Word Frequency:
+
+```{r}
+#add meaningless words and lemmatize remaning:
+
+customWords <- c('xx','xxxx','bank','citibank','boa','america','citi','wells','fargo','chase','account')
+
+total_complaints= data_labeled %>%
+  unnest_tokens(word,`Consumer complaint narrative`)%>%
+  mutate(lemma=lemmatize_words(word))%>%
+  filter(! lemma %in% customWords) %>%
+  anti_join(stop_words,by=c('lemma'='word')) %>%
+  count(Product,important,lemma)
+
+#visualize:
+wordFreq=total_complaints %>% group_by(lemma) %>% summarize(freq=sum(n)) %>% arrange(desc(freq))
+
+m_wordFreq=total_complaints %>% filter(important==1)%>% group_by(lemma) %>% summarize(freq=sum(n)) %>% arrange(desc(freq))
+
+totalcomplain_plot=wordFreq%>% slice(1:25) %>%
+ggplot(aes(x=fct_reorder(lemma,freq),y=freq))+geom_bar(stat='identity')+coord_flip()+labs(x='word',y='word frequency')
+
+monetary_complain_plot=m_wordFreq%>% slice(1:25) %>%
+ggplot(aes(x=fct_reorder(lemma,freq),y=freq))+geom_bar(stat='identity')+coord_flip()+labs(title='Monetary complaints',x='word',y='word frequency')
+monetary_complain_plot
+```
+
+Looking at all of the whole bank complaints, credit card related payment issue such as late fee may account for a big proportion.
+
+But different business department will have different urgent complaints.
+
+Let's do topic models by Product.
+
+
+##### Topic model on total monetary complaints and one product: 
+
+
+```{r}
+#import data
+data_total_monetary=read_csv('data/Monetary Complaints total data.csv') %>% mutate(important=(ifelse(`Company response to consumer`=='Closed with monetary relief',1,0)))
+
+credit_card=read_csv('data/credit card total data.csv')%>% mutate(important=(ifelse(`Company response to consumer`=='Closed with monetary relief',1,0)))
+data_bank_account=read_csv('data/bank account checking total data.csv')%>% mutate(important=(ifelse(`Company response to consumer`=='Closed with monetary relief',1,0)))
+
+customWords <- c('xx','xxxx','bank','citibank','boa','america','citi','wells','fargo','chase','account')
+```
+
+#### word cloud
+
+```{r}
+total_m_complaints= data_total_monetary %>%
+  unnest_tokens(word,`Consumer complaint narrative`)%>%
+  mutate(lemma=lemmatize_words(word))%>%
+  filter(! lemma %in% customWords) %>%
+  anti_join(stop_words,by=c('lemma'='word')) %>%
+  count(Product,important,lemma)
+
+
+#visualize:
+wordFreq=total_m_complaints %>% group_by(lemma) %>% summarize(freq=sum(n)) %>% arrange(desc(freq))
+
+topWords <- wordFreq %>%
+  top_n(100) 
+
+require(devtools)
+install_github("lchiffon/wordcloud2")
+library(wordcloud2)
+
+
+log=system.file("bank.png",package = "wordcloud2")
+
+topWords=topWords %>% rename(word=lemma)
+plot=wordcloud2(topWords,
+           figPath  = "data/bank.png",
+           color="skyblue")
+
+
+```
+
+## get text into tidy format, replace a few special words and remove stop words
+```{r}
+data_bank_accountTidy= data_bank_account %>%
+  unnest_tokens(word,`Consumer complaint narrative`)%>%
+  mutate(lemma=lemmatize_words(word))%>%
+  filter(! lemma %in% customWords) %>%
+  anti_join(stop_words,by=c('lemma'='word'))
+  
+wordcount=data_bank_accountTidy %>% count(important,lemma) %>%
+  arrange(desc(n))
+
+freqLimit <- 100
+vocab <- wordcount %>%
+  filter(n >= freqLimit)
+
+data_bank_accountTidy <- data_bank_accountTidy %>%
+  filter(lemma %in% vocab$lemma) 
+data_bank_accountTidy_1=data_bank_accountTidy %>% filter(important==1)
+data_bank_accountTidy_0=data_bank_accountTidy %>% filter(important==0)
+```
+
+#### 10 topics
+```{r}
+## create document term matrix for use in LDA 
+
+
+dtmUni <- data_bank_accountTidy_1 %>%
+  count(`Complaint ID`,lemma) %>%
+  cast_dtm(`Complaint ID`, lemma, n)
+
+theLDA <- LDA(dtmUni, k = 10, method="Gibbs",
+                control = list(alpha = 1/10,iter=5000,burnin=10000,seed = 1234))
+
+saveRDS(theLDA,file='data/bank_account_montetary_10topics.rds')
+
+```
+
+
+```{r}
+#analyze topics
+
+theTopicsBeta <- tidy(theLDA, matrix = "beta")
+
+TopicsTop <- theTopicsBeta %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  ungroup() %>%
+  mutate(x = n():1)  # for plotting
+
+plTopicWeights <- TopicsTop %>%
+  mutate(topic=factor(topic)) %>%
+  ggplot(aes(x=x,y=beta,fill=topic)) + 
+  geom_bar(stat='identity',show.legend = F) + 
+  coord_flip() + 
+  facet_wrap(~topic,scales='free') +
+  scale_x_continuous(breaks = TopicsTop$x,
+                     labels = TopicsTop$term,
+                     expand = c(0,0)) + 
+  labs(title='Top Words by Topic',
+       subtitle = ' Topic LDA of monetary Complaints',
+       x = 'word',
+       y = 'beta')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size = 6))
+
+```
+每个topic有重复的词
+
+#### 5 topics
+
+```{r}
+dtmUni <- data_bank_accountTidy_1 %>%
+  count(`Complaint ID`,lemma) %>%
+  cast_dtm(`Complaint ID`, lemma, n)
+
+theLDA <- LDA(dtmUni, k = 5, method="Gibbs",
+                control = list(alpha = 1/5,iter=5000,burnin=10000,seed = 1234))
+
+theTopicsBeta <- tidy(theLDA, matrix = "beta")
+
+TopicsTop <- theTopicsBeta %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  ungroup() %>%
+  mutate(x = n():1)  # for plotting
+
+plTopicWeights <- TopicsTop %>%
+  mutate(topic=factor(topic)) %>%
+  ggplot(aes(x=x,y=beta,fill=topic)) + 
+  geom_bar(stat='identity',show.legend = F) + 
+  coord_flip() + 
+  facet_wrap(~topic,scales='free') +
+  scale_x_continuous(breaks = TopicsTop$x,
+                     labels = TopicsTop$term,
+                     expand = c(0,0)) + 
+  labs(title='Top Words by Topic',
+       subtitle = ' Topic LDA of monetary Complaints',
+       x = 'word',
+       y = 'beta')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size = 6))
+
+plTopicWeights
+```
+
+
+```{r}
+#nonmonetary
+dtmUni <- data_bank_accountTidy_0 %>%
+  count(`Complaint ID`,lemma) %>%
+  cast_dtm(`Complaint ID`, lemma, n)
+
+theLDA <- LDA(dtmUni, k = 5, method="Gibbs",
+                control = list(alpha = 1/5,iter=5000,burnin=10000,seed = 1234))
+
+theTopicsBeta <- tidy(theLDA, matrix = "beta")
+
+TopicsTop <- theTopicsBeta %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  ungroup() %>%
+  mutate(x = n():1)  # for plotting
+
+plTopicWeights <- TopicsTop %>%
+  mutate(topic=factor(topic)) %>%
+  ggplot(aes(x=x,y=beta,fill=topic)) + 
+  geom_bar(stat='identity',show.legend = F) + 
+  coord_flip() + 
+  facet_wrap(~topic,scales='free') +
+  scale_x_continuous(breaks = TopicsTop$x,
+                     labels = TopicsTop$term,
+                     expand = c(0,0)) + 
+  labs(title='Top Words by Topic',
+       subtitle = ' Topic LDA of non monetary Complaints',
+       x = 'word',
+       y = 'beta')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size = 6))
+
+plTopicWeights
+```
+
+#### Bigram on bankaccount. Overdraft fee is obvious.
+
+```{r} 
+
+data_bank_accountTidy_bi=data_bank_account %>% select(`Complaint ID`,important,`Consumer complaint narrative`) %>% unnest_tokens(bigram,`Consumer complaint narrative`,token = "ngrams", n = 2)
+
+data_bank_accountTidy_bi_count=data_bank_accountTidy_bi %>% count(important,bigram) %>% arrange(desc(n)) %>% top_n(100) ###need to remove unecessary words.
+
+data_bank_accountTidy_bi=data_bank_accountTidy_bi %>%
+  count(important, bigram) %>%
+  separate(bigram, c("word1", "word2"), sep = " ", remove = F) %>%
+  mutate(word1=lemmatize_words(word1),word2=lemmatize_words(word2))%>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word1 %in% customWords,
+         !word2 %in% customWords
+  ) %>%
+  mutate(bigram=paste0(word1," ",word2))%>%
+  group_by(bigram,important)%>%
+  summarize(totalnumber=sum(n))%>%
+  arrange(desc(totalnumber))
+
+data_bank_accountTidy_bi_1=data_bank_accountTidy_bi %>% filter(important==1)
+
+topWords <- data_bank_accountTidy_bi_1%>%
+  slice(1:50) %>%
+  ungroup() %>%
+  mutate(xOrder=n():1)
+
+topWords_plot=topWords %>%
+  ggplot(aes(x=xOrder,y=totalnumber)) + 
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  scale_x_continuous(breaks = topWords$xOrder,labels = topWords$bigram,expand = c(0,0)) + 
+  coord_flip()+ theme_bw()+ theme(legend.position = "none")+
+  labs(x='Bigram',y='Frequency',
+       title = 'Top Bigrams, Monetary complaints on Bank Account',
+       subtitle = 'Stop-words removed')
+```
+
+```{r} 
+
+data_bank_accountTidy_bi_0=data_bank_accountTidy_bi %>% filter(important==0)
+
+topWords <- data_bank_accountTidy_bi_0 %>%
+  slice(1:50) %>%
+  ungroup() %>%
+  mutate(xOrder=n():1)
+
+topWords_plot_0=topWords %>%
+  ggplot(aes(x=xOrder,y=totalnumber)) + 
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  scale_x_continuous(breaks = topWords$xOrder,labels = topWords$bigram,expand = c(0,0)) + 
+  coord_flip()+ theme_bw()+ theme(legend.position = "none")+
+  labs(x='Bigram',y='Frequency',
+       title = 'Top Bigrams, Non Monetary complaints on Bank Account',
+       subtitle = 'Stop-words removed')
+```
+
+#### The probelm is that the key words of monetary and non monetary complaints are similar.Using TF-IDF and found the not duplicated words are very strange. 
+
+```{r}
+data_bank_accountTidy_bi=data_bank_account %>% select(`Complaint ID`,important,`Consumer complaint narrative`) %>% unnest_tokens(bigram,`Consumer complaint narrative`,token = "ngrams", n = 2)
+
+data_bank_accountTidy_bi=data_bank_accountTidy_bi %>%
+  separate(bigram, c("word1", "word2"), sep = " ", remove = F) %>%
+  mutate(word1=lemmatize_words(word1),word2=lemmatize_words(word2))%>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word1 %in% customWords,
+         !word2 %in% customWords
+  ) %>%
+  mutate(bigram=paste0(word1," ",word2))
+
+data_bank_accountTidy_bi_1=data_bank_accountTidy_bi %>% filter(important==1)
+
+bankaccountTF= data_bank_accountTidy_bi %>%
+  count(important,bigram) %>%
+  bind_tf_idf(bigram,important,n) %>%
+  arrange(desc(tf_idf)) %>%
+  slice(1:20)
+```
+
+### 5个topic的bigram：
+
+```{r}
+data_bank_accountTidy_bi=data_bank_account %>% select(`Complaint ID`,important,`Consumer complaint narrative`) %>% unnest_tokens(bigram,`Consumer complaint narrative`,token = "ngrams", n = 2)
+
+data_bank_accountTidy_bi=data_bank_accountTidy_bi %>%
+  separate(bigram, c("word1", "word2"), sep = " ", remove = F) %>%
+  mutate(word1=lemmatize_words(word1),word2=lemmatize_words(word2))%>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word1 %in% customWords,
+         !word2 %in% customWords
+  ) %>%
+  mutate(bigram=paste0(word1," ",word2))
+
+
+# filter monetary
+data_bank_accountTidy_bi_1=data_bank_accountTidy_bi %>% filter(important==1)
+
+
+dtmUni <- data_bank_accountTidy_bi_1 %>%
+  count(`Complaint ID`,bigram) %>%
+  cast_dtm(`Complaint ID`, bigram, n)
+
+theLDA <- LDA(dtmUni, k = 5, method="Gibbs",
+                control = list(alpha = 1/5,iter=5000,burnin=10000,seed = 1234))
+
+theTopicsBeta <- tidy(theLDA, matrix = "beta")
+
+TopicsTop <- theTopicsBeta %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  ungroup() %>%
+  mutate(x = n():1)  # for plotting
+
+plTopicWeights <- TopicsTop %>%
+  mutate(topic=factor(topic)) %>%
+  ggplot(aes(x=x,y=beta,fill=topic)) + 
+  geom_bar(stat='identity',show.legend = F) + 
+  coord_flip() + 
+  facet_wrap(~topic,scales='free') +
+  scale_x_continuous(breaks = TopicsTop$x,
+                     labels = TopicsTop$term,
+                     expand = c(0,0)) + 
+  labs(title='Top Bigram Words by Topic',
+       subtitle = ' Topic LDA of monetary Complaints',
+       x = 'word',
+       y = 'beta')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size = 6))
+
+plTopicWeights
+```
+
+##### TopicSentiments
+
+```{r} 
+
+data_bank_account_subbank= data_bank_account %>% filter(Company==c("WELLS FARGO & COMPANY","BANK OF AMERICA, NATIONAL ASSOCIATION","CITIBANK, N.A.","AMERICAN EXPRESS COMPANY","CAPITAL ONE FINANCIAL CORPORATION")) 
+
+data_bank_account_subbank$`Complaint ID`=as.character(data_bank_account_subbank$`Complaint ID`)
+
+data_bank_account_subbank=data.frame(lapply(data_bank_account_subbank, function(x) {
+                 gsub("WELLS FARGO & COMPANY", "WellsFargo", x)}))
+
+data_bank_account_subbank=data.frame(lapply(data_bank_account_subbank, function(x) {
+                 gsub("BANK OF AMERICA, NATIONAL ASSOCIATION" , "BOA", x)}))
+data_bank_account_subbank=data.frame(lapply(data_bank_account_subbank, function(x) {
+                 gsub("CITIBANK, N.A.", "CITI", x)}))
+
+data_bank_account_subbank=data.frame(lapply(data_bank_account_subbank, function(x) {
+                 gsub("CAPITAL ONE FINANCIAL CORPORATION","Capital 1", x)}))
+
+data_bank_account_subbank=data.frame(lapply(data_bank_account_subbank, function(x) {
+                 gsub("AMERICAN EXPRESS COMPANY","American Express", x)}))
+                 
+
+
+theTopicsGamma <- tidy(theLDA, matrix = "gamma") %>%
+  inner_join(data_bank_account_subbank,by=c('document'='Complaint.ID')) %>% mutate(topic_meaning=ifelse(topic==1,"debit card&fraud",ifelse(topic==2,"deposit service fee & promotion",ifelse(topic==3,"credit card late fee",ifelse(topic==4,"overdraft fee","social security&credit dopisit")))))
+
+
+
+by_bank_topic=theTopicsGamma %>%
+  group_by(Company,topic_meaning) %>%
+  summarize(mean = mean(gamma)) %>%
+  mutate(topic = factor(topic_meaning)) %>%
+  ggplot(aes(x=Company,y=mean,fill=topic_meaning)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~topic, scales = 'free', labeller = label_both) + 
+  scale_y_continuous(labels = percent) + 
+  theme(legend.position = 'none',axis.text.x=element_text(angle = 45, hjust = 1)) + 
+  labs(title = 'Topic Weights by Banks', x = 'Banks', y = 'Average Topic Weight')  
+```  
+
+
+
+```{r}
+dtmUni <- data_bank_accountTidy_bi_0 %>%
+  count(`Complaint ID`,bigram) %>%
+  cast_dtm(`Complaint ID`, bigram, n)
+
+theLDA <- LDA(dtmUni, k = 5, method="Gibbs",
+                control = list(alpha = 1/5,iter=5000,burnin=10000,seed = 1234))
+
+theTopicsBeta <- tidy(theLDA, matrix = "beta")
+
+TopicsTop <- theTopicsBeta %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  ungroup() %>%
+  mutate(x = n():1)  # for plotting
+
+plTopicWeights <- TopicsTop %>%
+  mutate(topic=factor(topic)) %>%
+  ggplot(aes(x=x,y=beta,fill=topic)) + 
+  geom_bar(stat='identity',show.legend = F) + 
+  coord_flip() + 
+  facet_wrap(~topic,scales='free') +
+  scale_x_continuous(breaks = TopicsTop$x,
+                     labels = TopicsTop$term,
+                     expand = c(0,0)) + 
+  labs(title='Top Bigram Words by Topic',
+       subtitle = 'Topic LDA of Non monetary Complaints',
+       x = 'word',
+       y = 'beta')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size = 6))
+
+plTopicWeights
+```
+
+#### Model:
+##### One hot model:each word is a feature,count the frequency as the value of the feature.+length(word) as another feature(need standardization)
+
+```{r}
+maxWords <- 3000  #only use the top 3000 words 
+tokenizer <- text_tokenizer(num_words = maxWords) %>%
+  fit_text_tokenizer(credit_card$`Consumer complaint narrative`)
+
+sequences <- texts_to_sequences(tokenizer, credit_card$`Consumer complaint narrative`) #3000 words' frequency in each sentence. some sentence contain a few words.
+
+word_index <- tokenizer$word_index
+
+nReviews <- nrow(credit_card)
+
+## one-hot code tokens and reshuffle data
+
+x <- sequences_to_matrix(tokenizer, sequences, mode = c("binary"))
+y <- as.numeric(credit_card$important)
+set.seed(1234)
+nTrain <- 10000
+shuffIndex <- sample(1:nReviews)
+trainIndex <- shuffIndex[1:nTrain]
+testIndex <- shuffIndex[(nTrain+1):nReviews]
+
+xTrain <- x[trainIndex,]
+yTrain <- y[trainIndex]
+
+xTest <- x[testIndex,]
+yTest <- y[testIndex]
+
+model <- keras_model_sequential() %>% 
+  layer_dense(units = 128, activation = "relu", input_shape = c(maxWords)) %>% 
+  layer_dense(units = 128, activation = "relu") %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+
+```
+
+#####  Embed model: using revolutionary neural network to find the weight of each word and use the weight as the vector. Vectors become the feature.
+
+```{r}
+maxWords <- 5000  #only use the top 5000 tokens 
+tokenizer <- text_tokenizer(num_words = maxWords) %>%
+  fit_text_tokenizer(data_bank_account$`Consumer complaint narrative`)
+
+sequences <- texts_to_sequences(tokenizer,data_bank_account$`Consumer complaint narrative`)
+
+maxLength <- 500 # 有的句子shorter than 500个词
+embedding_dim_text1 <- 150  # features of each word 组成了一个vector。所以每句话有150*500个feature
+data <- pad_sequences(sequences,maxlen = maxLength)
+
+word_index <- tokenizer$word_index
+
+x <- sequences_to_matrix(tokenizer, sequences, mode = c("binary"))
+y <- as.numeric(data_bank_account$important)
+
+nTrain <- 20000
+shuffIndex <- sample(1:nReviews)
+trainIndex <- shuffIndex[1:nTrain]
+testIndex <- shuffIndex[(nTrain+1):nReviews]
+
+
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = maxWords,
+                  output_dim = embedding_dim_text1,
+                  input_length = maxLength,
+                  name="embedding_text") %>%
+  layer_flatten() %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1,activation = "sigmoid")
+
+model %>% 
+  compile(loss = "binary_crossentropy",
+          optimizer = "rmsprop",
+          metric="accuracy"
+  )
+
+
+## fit model -----------------------------------------------------------------
+
+history <- model %>% 
+  fit(x = xTrain,
+      y = yTrain,
+      epochs = 5,
+      batch_size = 256,
+      validation_split = 0.2
+  )
+
+
+theEpoch=which.min(history$metrics$val_loss)
+
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = maxWords,
+                  output_dim = embedding_dim_text1,
+                  input_length = maxLength,
+                  name="embedding_text") %>%
+  layer_flatten() %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1,activation = "sigmoid")
+
+model %>% 
+  compile(loss = "binary_crossentropy",
+          optimizer = "rmsprop",
+          metric="accuracy"
+  )
+
+
+history <- model %>% 
+  fit(x = xTrain,
+      y = yTrain,
+      epochs = theEpoch,
+      batch_size = 256,
+      validation_split = 0.0
+  )
+
+
+resultsEmbed <- model %>% evaluate(xTest, yTest)
+resultsEmbed
+```
+
+
+## Bank Account
+
+```{r}
+
+bank_account_checking_total_data <- read_csv("data/bank account checking total data.csv")
+
+set.seed(1234)
+reviews <- bank_account_checking_total_data %>% 
+  mutate(important = `Company response to consumer` == "Closed with monetary relief") %>%
+  group_by(important) %>%
+  sample_n(5811) %>%
+  ungroup()
+
+table(reviews$important)
+```
+
+
+
+```{r}
+maxWords <- 10000
+
+tokenizer <- text_tokenizer(num_words = maxWords) %>%
+  fit_text_tokenizer(reviews$`Consumer complaint narrative`)
+
+sequences <- texts_to_sequences(tokenizer, reviews$`Consumer complaint narrative`)
+```
+
+
+```{r}
+maxLength <- 500
+
+embedding_dim_text1 <- 150
+
+data <- pad_sequences(sequences, maxlen = maxLength)
+```
+
+
+
+```{r}
+nReviews <- nrow(reviews)
+
+set.seed(1234)
+shuffIndex <- sample(1:nReviews)
+
+nTrain <- floor(nReviews * 0.7)
+trainIndex <- shuffIndex[1:nTrain]
+testIndex <- shuffIndex[(nTrain+1):nReviews]
+
+xTrain <- data[trainIndex,]
+xTest <- data[testIndex,]
+
+y <- as.numeric(reviews$important)
+yTrain <- y[trainIndex]
+yTest <- y[testIndex]
+```
+
+
+
+```{r}
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = maxWords,
+                  output_dim = embedding_dim_text1,
+                  input_length = maxLength,
+                  name = "embedding_text") %>%
+  layer_flatten() %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+model %>% 
+  compile(loss = "binary_crossentropy",
+          optimizer = "rmsprop",
+          metric = "accuracy",
+          weighted_metrics = list("0" = 0.8, "1" = 0.2)
+  )
+
+
+history <- model %>% 
+  fit(x = xTrain,
+      y = yTrain,
+      epochs = 10,
+      batch_size = 256,
+      validation_split = 0.2
+  )
+```
+
+
+```{r}
+theEpoch = which.min(history$metrics$val_loss)
+
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = maxWords,
+                  output_dim = embedding_dim_text1,
+                  input_length = maxLength,
+                  name = "embedding_text") %>%
+  layer_flatten() %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1,activation = "sigmoid")
+
+model %>% 
+  
+  compile(loss = "binary_crossentropy",
+          optimizer = "rmsprop",
+          metric = "accuracy",
+          weighted_metrics = list("0" = 0.8, "1" = 0.2)
+  )
+
+
+history <- model %>% 
+  fit(x = xTrain,
+      y = yTrain,
+      epochs = theEpoch,
+      batch_size = 256,
+      validation_split = 0.0
+  )
+
+
+resultsEmbed <- model %>% evaluate(xTest, yTest)
+resultsEmbed
+```
+
