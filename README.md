@@ -14,3 +14,10 @@ text-analysis on Yelp reviews
 We found the key words related with low rating and high rating. They could give the hotel ideas to improve its brand.
 
 We also see the trend of the key words that people care about and hotels can adjust its strategies to encourage people give high ratings.
+
+Sentiment_analysis_emotional
+----
+
+Sentiment_analysis on Cliton's vs Trump's speech.
+
+Analyzed people's emotions on Vegas hotels.
